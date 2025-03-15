@@ -6,9 +6,9 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch import nn
 
-N_LAGS = 7
-HORIZON = 1
-BATCH_SIZE = 10
+N_LAGS = 7  # number of lags (previous timesteps) used for predictions
+HORIZON = 1  # number of future timesteps to predict
+BATCH_SIZE = 10  # number of samples per batch
 
 mvtseries = pd.read_csv(
     "assets/daily_multivariate_timeseries.csv",
@@ -16,7 +16,7 @@ mvtseries = pd.read_csv(
     index_col="datetime",
 )
 
-num_vars = mvtseries.shape[1] + 1
+num_vars = mvtseries.shape[1] + 1  # +1 for target variable
 
 
 def create_training_set(
@@ -25,6 +25,7 @@ def create_training_set(
         horizon: int,
         test_size: float = 0.2,
         batch_size: int = 16):
+
     data["target"] = data["Incoming Solar"]
     data["time_index"] = np.arange(len(data))
     data["group_id"] = 0  # Assuming a single group for simplicity
@@ -48,11 +49,13 @@ def create_training_set(
     train_df_mod["target"] = target_scaler.transform(train_df_mod[["target"]])
     train_df_mod = train_df_mod.drop("Incoming Solar", axis=1)
 
+    # Define the feature names
     feature_names = [
         col for col in data.columns
         if col != "target" and col != "Incoming Solar"
     ]
 
+    # Create the TimeSeriesDataSet
     training_dataset = TimeSeriesDataSet(
         train_df_mod,
         time_idx="time_index",
@@ -61,12 +64,10 @@ def create_training_set(
         max_encoder_length=n_lags,
         max_prediction_length=horizon,
         time_varying_unknown_reals=feature_names,
-        scalers={name: StandardScaler()
-                 for name in feature_names},
+        scalers={name: StandardScaler() for name in feature_names},   # Feature-wise standardization (Z-score)
     )
 
-    loader = training_dataset.to_dataloader(batch_size=batch_size,
-                                            shuffle=False)
+    loader = training_dataset.to_dataloader(batch_size=batch_size, shuffle=False)
 
     return loader
 
@@ -95,18 +96,19 @@ criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # 3) Training loop
-num_epochs = 10
+num_epochs = 20
 for epoch in range(num_epochs):
 
     for batch in data_loader:
         x, y = batch
 
-        X = x["encoder_cont"].squeeze(-1)
+        # removes the last dimension (if 1) (batch_size, encoder_length, 1) → (batch_size, encoder_length)
+        X = x["encoder_cont"].squeeze(-1)   
         y_pred = model(X)
-        y_pred = y_pred.squeeze(1)
-
-        y_actual = y[0].squeeze(1)
-
+        
+        # removes the second dimension (if 1) (batch_size, 1) → (batch_size,)
+        y_pred = y_pred.squeeze(1)          
+        y_actual = y[0].squeeze(1)          
         loss = criterion(y_pred, y_actual)
 
         loss.backward()
