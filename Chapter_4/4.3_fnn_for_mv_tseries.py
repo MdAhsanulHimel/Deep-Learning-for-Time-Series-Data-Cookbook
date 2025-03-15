@@ -120,16 +120,16 @@ class MultivariateSeriesDataModule(pl.LightningDataModule):
         self.predict_set = TimeSeriesDataSet.from_dataset(self.training, self.data, predict=True)
 
     def train_dataloader(self):
-        return self.training.to_dataloader(batch_size=self.batch_size, shuffle=False)
+        return self.training.to_dataloader(batch_size=self.batch_size, num_workers=7, persistent_workers=True, shuffle=False)
 
     def val_dataloader(self):
-        return self.validation.to_dataloader(batch_size=self.batch_size, shuffle=False)
+        return self.validation.to_dataloader(batch_size=self.batch_size, num_workers=7, persistent_workers=True, shuffle=False)
 
     def test_dataloader(self):
-        return self.test.to_dataloader(batch_size=self.batch_size, shuffle=False)
+        return self.test.to_dataloader(batch_size=self.batch_size, num_workers=7, persistent_workers=True, shuffle=False)
 
     def predict_dataloader(self):
-        return self.predict_set.to_dataloader(batch_size=1, shuffle=False)
+        return self.predict_set.to_dataloader(batch_size=1, num_workers=7, persistent_workers=True, shuffle=False)
 
 
 class FeedForwardNet(nn.Module):
@@ -167,84 +167,29 @@ class FeedForwardNet(nn.Module):
 
 class FeedForwardModel(BaseModel):
     def __init__(self, input_dim: int, output_dim: int):
-        """
-        Initializes the FeedForwardModel with the specified input and output dimensions.
-        
-        Parameters
-        ----------
-        input_dim : int
-            The number of input features.
-        output_dim : int
-            The number of output features.
-        """
-        self.save_hyperparameters()  # Save hyperparameters for future reference
+        self.save_hyperparameters()
 
         super().__init__()
+        self.network = FeedForwardNet(
+            input_size=input_dim,
+            output_size=output_dim,
+        )
 
-        # Initialize the feed-forward neural network
-        self.network = FeedForwardNet(input_size=input_dim, output_size=output_dim)
-
-        # Initialize lists to store training and validation loss history
         self.train_loss_history = []
         self.val_loss_history = []
 
-        # Initialize accumulators for loss and batch count
         self.train_loss_sum = 0.0
         self.val_loss_sum = 0.0
         self.train_batch_count = 0
         self.val_batch_count = 0
 
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.01)
-
     def forward(self, x):
         network_input = x["encoder_cont"].squeeze(-1)
+
         prediction = self.network(network_input)
         output = self.to_network_output(prediction=prediction)
+
         return output
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        y_pred = self(x).prediction   # Get predictions
-        y_pred = y_pred.squeeze(1)
-
-        y_actual = y[0].squeeze(1)
-
-        loss = F.mse_loss(y_pred, y_actual)
-        self.train_loss_sum += loss.item()
-        self.train_batch_count += 1
-
-        self.log("train_loss", loss)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        self.eval()  # Switch to evaluation mode
-        with torch.no_grad():  # Disable gradients
-            x, y = batch
-            y_pred = self(x).prediction
-            y_pred = y_pred.squeeze(1)
-            y_actual = y[0].squeeze(1)
-            loss = F.mse_loss(y_pred, y_actual)
-            self.log("val_loss", loss)
-        return loss
-
-    def test_step(self, batch, batch_idx):
-        self.eval()
-        with torch.no_grad():
-            x, y = batch
-            y_pred = self(x).prediction
-            y_pred = y_pred.squeeze(1)
-            y_actual = y[0].squeeze(1)
-            loss = F.mse_loss(y_pred, y_actual)
-            self.log("test_loss", loss)
-
-    def predict_step(self, batch, batch_idx):
-        self.eval()
-        with torch.no_grad():
-            x, _ = batch
-            y_pred = self(x).prediction
-            y_pred = y_pred.squeeze(1)
-        return y_pred
 
     def on_train_epoch_end(self):
         # Compute the average loss and reset counters
@@ -262,41 +207,105 @@ class FeedForwardModel(BaseModel):
             self.val_loss_sum = 0.0
             self.val_batch_count = 0
 
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        y_pred = self(x).prediction
+        y_pred = y_pred.squeeze(1)
+
+        y_actual = y[0].squeeze(1)
+
+        loss = F.mse_loss(y_pred, y_actual)
+        self.train_loss_sum += loss.item()
+        self.train_batch_count += 1
+
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        y_pred = self(x).prediction
+        y_pred = y_pred.squeeze(1)
+
+        y_actual = y[0].squeeze(1)
+
+        loss = F.mse_loss(y_pred, y_actual)
+        self.val_loss_sum += loss.item()
+        self.val_batch_count += 1
+        self.log("val_loss", loss)
+        return loss
+
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+
+        y_pred = self(x).prediction
+        y_pred = y_pred.squeeze(1)
+
+        y_actual = y[0].squeeze(1)
+
+        loss = F.mse_loss(y_pred, y_actual)
+        self.log("test_loss", loss)
+
+    def predict_step(self, batch, batch_idx):
+        x, y = batch
+
+        y_pred = self(x).prediction
+        y_pred = y_pred.squeeze(1)
+
+        return y_pred
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=0.01)
 
 
-
-
-
+# Initialize the data module
 datamodule = MultivariateSeriesDataModule(
     data=mvtseries, n_lags=7, horizon=1, batch_size=32, test_size=0.3
 )
 
-datamodule.setup()
+# Call setup to prepare the data
+datamodule.setup()  
 
+# Initialize the model
 model = FeedForwardModel(input_dim=N_LAGS * n_vars, output_dim=1)
 
-trainer = pl.Trainer(max_epochs=30)
+# Initialize the trainer
+trainer = pl.Trainer(max_epochs=30, accelerator="gpu", devices=1)
+
+# Train the model
 trainer.fit(model, datamodule)
 
+# Test the model
 trainer.test(model=model, datamodule=datamodule)
 
+# Validate the model
+trainer.validate(model=model, datamodule=datamodule)
+
+# Make predictions
 forecasts = trainer.predict(model=model, datamodule=datamodule)
 
-# Plot the average loss per epoch
-plt.figure(figsize=(10, 6))
-plt.plot(model.train_loss_history, label="Average Training Loss")
-plt.plot(model.val_loss_history, label="Average Validation Loss")
-plt.title("Average Training and Validation Losses Per Epoch")
-plt.xlabel("Epoch")
-plt.ylabel("Average Loss")
-plt.legend()
-plt.grid(True)  # Optional: Add grid for better readability
 
-# Save the figure to the 'plots' directory
+
+# Create the plot
+plt.figure(figsize=(10, 6), dpi=300)  # High DPI for publication quality
+plt.plot(model.train_loss_history, label="Training Loss", linewidth=2, marker="o", markersize=6)
+plt.plot(model.val_loss_history, label="Validation Loss", linewidth=2, marker="s", markersize=6, linestyle="--")
+
+# Labels and Title
+plt.title("Training and Validation Loss per Epoch", fontsize=14, fontweight="bold")
+plt.xlabel("Epoch", fontsize=12)
+plt.ylabel("Loss", fontsize=12)
+
+# Improve Readability
+plt.legend(fontsize=12)
+plt.grid(True, linestyle="--", alpha=0.6)
+plt.xticks(fontsize=11)
+plt.yticks(fontsize=11)
+
+# Save the figure
 plots_dir = "./assets/plots"
 os.makedirs(plots_dir, exist_ok=True)
 plot_path = os.path.join(plots_dir, "average_training_validation_loss_per_epoch.png")
-plt.savefig(plot_path)
+plt.savefig(plot_path, bbox_inches="tight")  # Save without extra whitespace
 plt.close()
 
 print(f"Plot saved to {plot_path}")
