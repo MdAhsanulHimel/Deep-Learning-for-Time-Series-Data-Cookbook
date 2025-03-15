@@ -13,6 +13,7 @@ logs
 
 # C extensions
 *.so
+*.ini
 
 # Distribution / packaging
 .Python
