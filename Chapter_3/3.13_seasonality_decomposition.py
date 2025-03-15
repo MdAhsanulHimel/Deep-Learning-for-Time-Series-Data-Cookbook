@@ -124,3 +124,49 @@ y_denorm = scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
 
 # combining the forecasts
 preds = y_denorm + seas_preds
+
+
+
+
+
+# ✅ STL Decomposition
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.api import STL
+
+# ✅ Generate Dummy Time Series Data
+np.random.seed(42)
+time = np.arange(0, 365 * 2)  # 2 years of daily data
+seasonal_pattern = 10 * np.sin(2 * np.pi * time / 365)  # Yearly seasonality
+trend = 0.05 * time  # Slight upward trend
+noise = np.random.normal(0, 2, size=len(time))  # Random noise
+series = seasonal_pattern + trend + noise  # Combine components
+
+# ✅ Apply STL Decomposition
+stl = STL(series, period=365)
+result = stl.fit()
+
+# ✅ Compute Seasonally Adjusted Series
+seas_adj = series - result.seasonal
+
+# ✅ Plot Original Series, Seasonal Component, and Adjusted Series
+plt.figure(figsize=(12, 6))
+
+plt.subplot(3, 1, 1)
+plt.plot(time, series, label="Original Series")
+plt.legend()
+
+plt.subplot(3, 1, 2)
+plt.plot(time, result.seasonal, label="Seasonal Component", color="orange")
+plt.legend()
+
+plt.subplot(3, 1, 3)
+plt.plot(time, seas_adj, label="Seasonally Adjusted Series", color="green")
+plt.legend()
+
+plt.xlabel("Time")
+plt.suptitle("STL Decomposition: Original Series, Seasonal Component, and Adjusted Series")
+plt.tight_layout()
+plt.show()
