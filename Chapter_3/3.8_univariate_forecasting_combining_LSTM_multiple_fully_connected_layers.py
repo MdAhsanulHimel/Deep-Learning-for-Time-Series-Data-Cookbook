@@ -67,14 +67,15 @@ class HybridLSTM(nn.Module):
         self.num_layers = num_layers
 
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.fc1 = nn.Linear(hidden_dim, 50)
-        self.fc2 = nn.Linear(50, output_dim)
+        self.fc1 = nn.Linear(hidden_dim, 50)   # Fully connected layer 1
+        self.fc2 = nn.Linear(50, output_dim)   # Fully connected layer 2
 
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
 
         out, _ = self.lstm(x, (h0, c0))
+        # Pass the last output to Fully Connected layer
         out = F.relu(self.fc1(out[:, -1, :]))
         out = self.fc2(out)
         return out
