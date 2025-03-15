@@ -33,6 +33,22 @@ class MultivariateSeriesDataModule(pl.LightningDataModule):
         test_size: float = 0.2,
         batch_size: int = 16,
     ):
+        """
+        DataModule for multivariate time series forecasting.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            The dataset to be used for training, validation, and testing.
+        n_lags : int
+            The number of lagged observations to include as features.
+        horizon : int
+            The number of time steps ahead to forecast.
+        test_size : float, optional
+            The proportion of the data to use for testing, by default 0.2.
+        batch_size : int, optional
+            The batch size for training, by default 16.
+        """
         super().__init__()
         self.data = data
         self.feature_names = [col for col in data.columns if col != "Incoming Solar"]
@@ -49,25 +65,26 @@ class MultivariateSeriesDataModule(pl.LightningDataModule):
     def preprocess_data(self):
         self.data["target"] = self.data["Incoming Solar"]
         self.data["time_index"] = np.arange(len(self.data))
-        self.data["group_id"] = (
-            0  # Assuming a single group for simplicity; adjust if needed
-        )
+        self.data["group_id"] = 0  # Assuming a single group for simplicity; adjust if needed
 
-    def split_data(self):
+    def split_data(self):        
         time_indices = self.data["time_index"].values
-        train_indices, test_indices = train_test_split(
-            time_indices, test_size=self.test_size, shuffle=False
-        )
-        train_indices, val_indices = train_test_split(
-            train_indices, test_size=0.1, shuffle=False
+        train_size = int(len(time_indices) * (1 - self.test_size))
+        val_size = int(train_size * 0.1)
+        train_indices, val_indices, test_indices = (
+            time_indices[:train_size - val_size],
+            time_indices[train_size - val_size:train_size],
+            time_indices[train_size:],
         )
         return train_indices, val_indices, test_indices
 
     def scale_target(self, df, indices):
         scaled_values = self.target_scaler.transform(df.loc[indices, ["target"]])
         df.loc[indices, "target"] = scaled_values
+    # Always fit the scaler on training data only to prevent information leakage
 
     def setup(self, stage=None):
+
         self.preprocess_data()
         train_indices, val_indices, test_indices = self.split_data()
 
@@ -96,11 +113,11 @@ class MultivariateSeriesDataModule(pl.LightningDataModule):
             time_varying_unknown_reals=self.feature_names,
             scalers={name: StandardScaler() for name in self.feature_names},
         )
+
+        # from_dataset automatically reuses the configuration of the training dataset (self.training) for validation, testing, and predicting
         self.validation = TimeSeriesDataSet.from_dataset(self.training, val_df)
         self.test = TimeSeriesDataSet.from_dataset(self.training, test_df)
-        self.predict_set = TimeSeriesDataSet.from_dataset(
-            self.training, self.data, predict=True
-        )
+        self.predict_set = TimeSeriesDataSet.from_dataset(self.training, self.data, predict=True)
 
     def train_dataloader(self):
         return self.training.to_dataloader(batch_size=self.batch_size, shuffle=False)
@@ -116,15 +133,30 @@ class MultivariateSeriesDataModule(pl.LightningDataModule):
 
 
 class FeedForwardNet(nn.Module):
-    def __init__(self, input_size, output_size):
+    def __init__(self, input_size: int, output_size: int):
+        """
+        A feed-forward neural network with two hidden layers.
+
+        Parameters
+        ----------
+        input_size : int
+            The number of input features.
+        output_size : int
+            The number of output features.
+        """
         super().__init__()
 
+        # The network consists of two linear layers with a ReLU activation
+        # function in between
         self.net = nn.Sequential(
+            # First layer with 16 neurons and ReLU activation
             nn.Linear(input_size, 16),
             nn.ReLU(),
+            # Second layer with 8 neurons and ReLU activation
             nn.Linear(16, 8),
             nn.ReLU(),
-            nn.Linear(8, output_size),
+            # Output layer with output_size neurons
+            nn.Linear(8, output_size)
         )
 
     def forward(self, X):
@@ -135,29 +167,84 @@ class FeedForwardNet(nn.Module):
 
 class FeedForwardModel(BaseModel):
     def __init__(self, input_dim: int, output_dim: int):
-        self.save_hyperparameters()
+        """
+        Initializes the FeedForwardModel with the specified input and output dimensions.
+        
+        Parameters
+        ----------
+        input_dim : int
+            The number of input features.
+        output_dim : int
+            The number of output features.
+        """
+        self.save_hyperparameters()  # Save hyperparameters for future reference
 
         super().__init__()
-        self.network = FeedForwardNet(
-            input_size=input_dim,
-            output_size=output_dim,
-        )
 
+        # Initialize the feed-forward neural network
+        self.network = FeedForwardNet(input_size=input_dim, output_size=output_dim)
+
+        # Initialize lists to store training and validation loss history
         self.train_loss_history = []
         self.val_loss_history = []
 
+        # Initialize accumulators for loss and batch count
         self.train_loss_sum = 0.0
         self.val_loss_sum = 0.0
         self.train_batch_count = 0
         self.val_batch_count = 0
 
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=0.01)
+
     def forward(self, x):
         network_input = x["encoder_cont"].squeeze(-1)
-
         prediction = self.network(network_input)
         output = self.to_network_output(prediction=prediction)
-
         return output
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        y_pred = self(x).prediction   # Get predictions
+        y_pred = y_pred.squeeze(1)
+
+        y_actual = y[0].squeeze(1)
+
+        loss = F.mse_loss(y_pred, y_actual)
+        self.train_loss_sum += loss.item()
+        self.train_batch_count += 1
+
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        self.eval()  # Switch to evaluation mode
+        with torch.no_grad():  # Disable gradients
+            x, y = batch
+            y_pred = self(x).prediction
+            y_pred = y_pred.squeeze(1)
+            y_actual = y[0].squeeze(1)
+            loss = F.mse_loss(y_pred, y_actual)
+            self.log("val_loss", loss)
+        return loss
+
+    def test_step(self, batch, batch_idx):
+        self.eval()
+        with torch.no_grad():
+            x, y = batch
+            y_pred = self(x).prediction
+            y_pred = y_pred.squeeze(1)
+            y_actual = y[0].squeeze(1)
+            loss = F.mse_loss(y_pred, y_actual)
+            self.log("test_loss", loss)
+
+    def predict_step(self, batch, batch_idx):
+        self.eval()
+        with torch.no_grad():
+            x, _ = batch
+            y_pred = self(x).prediction
+            y_pred = y_pred.squeeze(1)
+        return y_pred
 
     def on_train_epoch_end(self):
         # Compute the average loss and reset counters
@@ -175,54 +262,9 @@ class FeedForwardModel(BaseModel):
             self.val_loss_sum = 0.0
             self.val_batch_count = 0
 
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        y_pred = self(x).prediction
-        y_pred = y_pred.squeeze(1)
 
-        y_actual = y[0].squeeze(1)
 
-        loss = F.mse_loss(y_pred, y_actual)
-        self.train_loss_sum += loss.item()
-        self.train_batch_count += 1
 
-        self.log("train_loss", loss)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        y_pred = self(x).prediction
-        y_pred = y_pred.squeeze(1)
-
-        y_actual = y[0].squeeze(1)
-
-        loss = F.mse_loss(y_pred, y_actual)
-        self.val_loss_sum += loss.item()
-        self.val_batch_count += 1
-        self.log("val_loss", loss)
-        return loss
-
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-
-        y_pred = self(x).prediction
-        y_pred = y_pred.squeeze(1)
-
-        y_actual = y[0].squeeze(1)
-
-        loss = F.mse_loss(y_pred, y_actual)
-        self.log("test_loss", loss)
-
-    def predict_step(self, batch, batch_idx):
-        x, y = batch
-
-        y_pred = self(x).prediction
-        y_pred = y_pred.squeeze(1)
-
-        return y_pred
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.01)
 
 
 datamodule = MultivariateSeriesDataModule(
